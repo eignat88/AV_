@@ -8,6 +8,7 @@ recognized, execution stops and the reason is written to the log.
 from __future__ import annotations
 
 import argparse
+import configparser
 import logging
 import random
 import re
@@ -58,6 +59,7 @@ DEFAULT_VPN_COUNTRIES = (
 )
 DEFAULT_VPN_IP_CHECK_URL = "https://api.ipify.org?format=json"
 BROWSEC_POPUP_PATHS = ("popup.html", "popup/index.html", "index.html")
+DEFAULT_CONFIG_FILE = "config.ini"
 
 RESTRICTION_PATTERNS = (
     "captcha",
@@ -167,45 +169,134 @@ def was_arg_passed(option_name: str) -> bool:
     return any(arg == option_name or arg.startswith(f"{option_name}=") for arg in sys.argv[1:])
 
 
+def load_config(config_file: str) -> configparser.ConfigParser:
+    """Load optional INI defaults without requiring a config file to exist."""
+    config = configparser.ConfigParser(interpolation=None)
+    read_files = config.read(config_file, encoding="utf-8")
+    if read_files:
+        logging.debug("Loaded configuration defaults from %s", read_files[0])
+    return config
+
+
+def config_value(
+    config: configparser.ConfigParser,
+    section: str,
+    option: str,
+    default: str | None = None,
+) -> str | None:
+    if config.has_option(section, option):
+        return config.get(section, option)
+    return default
+
+
+def config_int(config: configparser.ConfigParser, section: str, option: str, default: int) -> int:
+    if config.has_option(section, option):
+        return config.getint(section, option)
+    return default
+
+
+def config_bool(config: configparser.ConfigParser, section: str, option: str, default: bool = False) -> bool:
+    if config.has_option(section, option):
+        return config.getboolean(section, option)
+    return default
+
+
+def parse_config_file_arg() -> str:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--config-file",
+        default=DEFAULT_CONFIG_FILE,
+        help="Optional INI file with defaults for Edge, VPN, Avito, timing, and logging options",
+    )
+    args, _ = parser.parse_known_args()
+    return args.config_file
+
+
 def parse_args() -> Settings:
+    config_file = parse_config_file_arg()
+    config = load_config(config_file)
+
     parser = argparse.ArgumentParser(
         description=(
             "Open an own Avito profile and item page in Microsoft Edge, then "
             "check item photos one by one without bypassing site restrictions."
         )
     )
-    parser.add_argument("--profile-url", default=DEFAULT_PROFILE_URL, help="Avito seller profile URL")
-    parser.add_argument("--item-url", default=DEFAULT_ITEM_URL, help="Avito item URL")
-    parser.add_argument("--min-pause", type=int, default=15, help="Minimum pause per photo, seconds")
-    parser.add_argument("--max-pause", type=int, default=30, help="Maximum pause per photo, seconds")
+    parser.add_argument(
+        "--config-file",
+        default=config_file,
+        help="Optional INI file with defaults for Edge, VPN, Avito, timing, and logging options",
+    )
+    parser.add_argument(
+        "--profile-url",
+        default=config_value(config, "avito", "profile_url", DEFAULT_PROFILE_URL),
+        help="Avito seller profile URL",
+    )
+    parser.add_argument(
+        "--item-url",
+        default=config_value(config, "avito", "item_url", DEFAULT_ITEM_URL),
+        help="Avito item URL",
+    )
+    parser.add_argument(
+        "--min-pause",
+        type=int,
+        default=config_int(config, "timing", "min_pause", 15),
+        help="Minimum pause per photo, seconds",
+    )
+    parser.add_argument(
+        "--max-pause",
+        type=int,
+        default=config_int(config, "timing", "max_pause", 30),
+        help="Maximum pause per photo, seconds",
+    )
     parser.add_argument(
         "--min-ad-open-seconds",
         type=int,
-        default=30,
+        default=config_int(config, "timing", "min_ad_open_seconds", 30),
         help="Minimum time to keep the item page open before closing, seconds",
     )
     parser.add_argument(
         "--max-ad-open-seconds",
         type=int,
-        default=50,
+        default=config_int(config, "timing", "max_ad_open_seconds", 50),
         help="Maximum time to keep the item page open before closing, seconds",
     )
-    parser.add_argument("--page-timeout", type=int, default=45, help="Page load timeout, seconds")
-    parser.add_argument("--edge-driver-path", help="Optional path to msedgedriver")
+    parser.add_argument(
+        "--page-timeout",
+        type=int,
+        default=config_int(config, "timing", "page_timeout", 45),
+        help="Page load timeout, seconds",
+    )
+    parser.add_argument(
+        "--edge-driver-path",
+        default=config_value(config, "edge", "driver_path"),
+        help="Optional path to msedgedriver",
+    )
     parser.add_argument(
         "--edge-user-data-dir",
+        default=config_value(config, "edge", "user_data_dir"),
         help="Optional Edge user data directory with the VPN extension installed",
     )
-    parser.add_argument("--edge-profile-directory", help="Optional Edge profile directory name, for example 'Default'")
-    parser.add_argument("--headless", action="store_true", help="Run Edge in headless mode")
+    parser.add_argument(
+        "--edge-profile-directory",
+        default=config_value(config, "edge", "profile_directory"),
+        help="Optional Edge profile directory name, for example 'Default'",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        default=config_bool(config, "edge", "headless", False),
+        help="Run Edge in headless mode",
+    )
     parser.add_argument(
         "--enable-vpn",
         action="store_true",
+        default=config_bool(config, "vpn", "enable", False),
         help="Enable Browsec VPN and pick a random working location before opening Avito",
     )
     parser.add_argument(
         "--vpn-extension-id",
-        default=BROWSEC_EXTENSION_ID,
+        default=config_value(config, "vpn", "extension_id", BROWSEC_EXTENSION_ID),
         help=(
             "Browsec extension ID installed in the selected Edge profile. "
             "Default is the Microsoft Edge Add-ons ID; the Chrome Web Store ID is often blocked in Edge."
@@ -213,23 +304,29 @@ def parse_args() -> Settings:
     )
     parser.add_argument(
         "--chrome-browsec-extension-id",
-        default=BROWSEC_CHROME_EXTENSION_ID,
+        default=config_value(config, "vpn", "chrome_browsec_extension_id", BROWSEC_CHROME_EXTENSION_ID),
         help="Known Chrome Web Store Browsec ID, used only to explain ERR_BLOCKED_BY_CLIENT diagnostics",
     )
     parser.add_argument(
         "--vpn-countries",
-        default=",".join(DEFAULT_VPN_COUNTRIES),
+        default=config_value(config, "vpn", "countries", ",".join(DEFAULT_VPN_COUNTRIES)),
         help="Comma-separated Browsec locations to try in random order",
     )
-    parser.add_argument("--vpn-timeout", type=int, default=30, help="VPN setup timeout per location, seconds")
+    parser.add_argument(
+        "--vpn-timeout",
+        type=int,
+        default=config_int(config, "vpn", "timeout", 30),
+        help="VPN setup timeout per location, seconds",
+    )
     parser.add_argument(
         "--vpn-ip-check-url",
-        default=DEFAULT_VPN_IP_CHECK_URL,
+        default=config_value(config, "vpn", "ip_check_url", DEFAULT_VPN_IP_CHECK_URL),
         help="URL used to verify that the selected VPN location has internet access",
     )
     parser.add_argument(
         "--test-browsec",
         action="store_true",
+        default=config_bool(config, "vpn", "test_browsec", False),
         help=(
             "Only launch Edge, open the Browsec extension, turn protection on, "
             "verify internet access, then keep the browser open for manual inspection."
@@ -238,13 +335,20 @@ def parse_args() -> Settings:
     parser.add_argument(
         "--browsec-test-hold-seconds",
         type=int,
-        default=30,
+        default=config_int(config, "vpn", "test_hold_seconds", 30),
         help="How long to keep Edge open after --test-browsec succeeds, seconds",
     )
-    parser.add_argument("--log-file", default="avito_ad_check.log", help="Optional log file path")
+    parser.add_argument(
+        "--log-file",
+        default=config_value(config, "logging", "log_file", "avito_ad_check.log"),
+        help="Optional log file path",
+    )
 
     args = parser.parse_args()
     configure_logging(args.log_file)
+
+    if config.sections():
+        logging.info("Loaded configuration defaults from %s", args.config_file)
 
     if args.min_pause < 0 or args.max_pause < 0:
         raise AvitoCheckError("Pause values must be non-negative.")
@@ -277,7 +381,9 @@ def parse_args() -> Settings:
         headless=args.headless,
         enable_vpn=args.enable_vpn,
         vpn_extension_id=args.vpn_extension_id,
-        vpn_extension_id_was_explicit=was_arg_passed("--vpn-extension-id"),
+        vpn_extension_id_was_explicit=(
+            was_arg_passed("--vpn-extension-id") or config.has_option("vpn", "extension_id")
+        ),
         chrome_browsec_extension_id=args.chrome_browsec_extension_id,
         vpn_countries=vpn_countries,
         vpn_timeout=args.vpn_timeout,

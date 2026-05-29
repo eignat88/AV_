@@ -1,0 +1,37 @@
+# Copy this file to config.ini and adjust local paths before running.
+# Command-line arguments always override these defaults.
+
+[edge]
+# Use the Edge user data root, not the profile folder itself.
+# For example, if the profile is:
+# C:\Users\Jacks\AppData\Local\Microsoft\Edge\User Data\Default
+# then user_data_dir is:
+user_data_dir = C:\Users\Jacks\AppData\Local\Microsoft\Edge\User Data
+profile_directory = Default
+# driver_path = C:\path\to\msedgedriver.exe
+headless = false
+
+[vpn]
+enable = false
+# Microsoft Edge Add-ons Browsec extension ID. Verify it in edge://extensions.
+extension_id = fjnehcbecaggobjholekjijaaekbnlgj
+# Set test_browsec = true to open only the Browsec popup and verify the VPN.
+test_browsec = false
+test_hold_seconds = 30
+timeout = 30
+ip_check_url = https://api.ipify.org?format=json
+countries = Австрия,Бельгия,Болгария,Великобритания,Германия,Дания,Испания,Италия,Канада,Нидерланды,Норвегия,Польша,Румыния,США,Финляндия,Франция,Чехия,Швейцария,Швеция
+
+[avito]
+# profile_url = https://www.avito.ru/...
+# item_url = https://www.avito.ru/...
+
+[timing]
+min_pause = 15
+max_pause = 30
+min_ad_open_seconds = 30
+max_ad_open_seconds = 50
+page_timeout = 45
+
+[logging]
+log_file = avito_ad_check.log
