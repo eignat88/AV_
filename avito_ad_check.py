@@ -104,6 +104,8 @@ class Settings:
     item_url: str
     min_pause: int
     max_pause: int
+    min_ad_open_seconds: int
+    max_ad_open_seconds: int
     page_timeout: int
     edge_driver_path: str | None
     headless: bool
@@ -132,6 +134,18 @@ def parse_args() -> Settings:
     parser.add_argument("--item-url", default=DEFAULT_ITEM_URL, help="Avito item URL")
     parser.add_argument("--min-pause", type=int, default=15, help="Minimum pause per photo, seconds")
     parser.add_argument("--max-pause", type=int, default=30, help="Maximum pause per photo, seconds")
+    parser.add_argument(
+        "--min-ad-open-seconds",
+        type=int,
+        default=30,
+        help="Minimum time to keep the item page open before closing, seconds",
+    )
+    parser.add_argument(
+        "--max-ad-open-seconds",
+        type=int,
+        default=50,
+        help="Maximum time to keep the item page open before closing, seconds",
+    )
     parser.add_argument("--page-timeout", type=int, default=45, help="Page load timeout, seconds")
     parser.add_argument("--edge-driver-path", help="Optional path to msedgedriver")
     parser.add_argument("--headless", action="store_true", help="Run Edge in headless mode")
@@ -144,12 +158,18 @@ def parse_args() -> Settings:
         raise AvitoCheckError("Pause values must be non-negative.")
     if args.min_pause > args.max_pause:
         raise AvitoCheckError("--min-pause cannot be greater than --max-pause.")
+    if args.min_ad_open_seconds < 0 or args.max_ad_open_seconds < 0:
+        raise AvitoCheckError("Ad open time values must be non-negative.")
+    if args.min_ad_open_seconds > args.max_ad_open_seconds:
+        raise AvitoCheckError("--min-ad-open-seconds cannot be greater than --max-ad-open-seconds.")
 
     return Settings(
         profile_url=args.profile_url,
         item_url=args.item_url,
         min_pause=args.min_pause,
         max_pause=args.max_pause,
+        min_ad_open_seconds=args.min_ad_open_seconds,
+        max_ad_open_seconds=args.max_ad_open_seconds,
         page_timeout=args.page_timeout,
         edge_driver_path=args.edge_driver_path,
         headless=args.headless,
@@ -260,7 +280,9 @@ def get_photo_count(driver: WebDriver) -> int:
     if thumbnail_count:
         return thumbnail_count
 
-    image_count = count_unique_image_sources(visible_elements(driver, ('[role="dialog"] img', '[data-marker*="gallery"] img')))
+    image_count = count_unique_image_sources(
+        visible_elements(driver, ('[role="dialog"] img', '[data-marker*="gallery"] img'))
+    )
     if image_count:
         return image_count
 
@@ -277,6 +299,31 @@ def go_to_next_photo(driver: WebDriver) -> None:
 
     logging.info("Next-photo button was not found; sending ArrowRight to the page")
     driver.switch_to.active_element.send_keys(Keys.ARROW_RIGHT)
+
+
+def wait_then_close_ad_and_clear_cookies(driver: WebDriver, settings: Settings) -> None:
+    delay = random.randint(settings.min_ad_open_seconds, settings.max_ad_open_seconds)
+    logging.info(
+        "Item page is open; starting auto-close wait for %s seconds (configured range: %s-%s seconds)",
+        delay,
+        settings.min_ad_open_seconds,
+        settings.max_ad_open_seconds,
+    )
+    time.sleep(delay)
+
+    logging.info("Clearing browser cookies before closing the item page")
+    driver.delete_all_cookies()
+    logging.info("Cookies cleared")
+
+    window_handles = driver.window_handles
+    if len(window_handles) > 1:
+        logging.info("Closing current item tab")
+        driver.close()
+        remaining_handles = driver.window_handles
+        if remaining_handles:
+            driver.switch_to.window(remaining_handles[0])
+    else:
+        logging.info("Only one browser window is open; final driver.quit() will close the item page")
 
 
 def browse_photos(driver: WebDriver, settings: Settings) -> None:
@@ -313,8 +360,10 @@ def main() -> int:
         driver = start_edge(settings)
         open_page(driver, settings.profile_url, settings.page_timeout, "seller profile")
         open_page(driver, settings.item_url, settings.page_timeout, "item page")
+        logging.info("Item page opened successfully")
         browse_photos(driver, settings)
-        logging.info("Photo check completed successfully")
+        wait_then_close_ad_and_clear_cookies(driver, settings)
+        logging.info("Photo check and item auto-close completed successfully")
         return 0
     except AvitoCheckError as exc:
         logging.error("Check stopped: %s", exc)
