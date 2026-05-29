@@ -31,7 +31,9 @@ DEFAULT_ITEM_URL = (
     "czoxOiJ4IjtzOjE2OiJHdWozQjdnVzRRV3pKV3Z5Ijt9tOTEBT8AAAA"
 )
 
-BROWSEC_EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh"
+BROWSEC_EDGE_EXTENSION_ID = "fjnehcbecaggobjholekjijaaekbnlgj"
+BROWSEC_CHROME_EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh"
+BROWSEC_EXTENSION_ID = BROWSEC_EDGE_EXTENSION_ID
 DEFAULT_VPN_COUNTRIES = (
     "Австрия",
     "Бельгия",
@@ -138,6 +140,7 @@ class Settings:
     headless: bool
     enable_vpn: bool
     vpn_extension_id: str
+    chrome_browsec_extension_id: str
     vpn_countries: tuple[str, ...]
     vpn_timeout: int
     vpn_ip_check_url: str
@@ -196,7 +199,15 @@ def parse_args() -> Settings:
     parser.add_argument(
         "--vpn-extension-id",
         default=BROWSEC_EXTENSION_ID,
-        help="Browsec extension ID installed in the selected Edge profile",
+        help=(
+            "Browsec extension ID installed in the selected Edge profile. "
+            "Default is the Microsoft Edge Add-ons ID; the Chrome Web Store ID is often blocked in Edge."
+        ),
+    )
+    parser.add_argument(
+        "--chrome-browsec-extension-id",
+        default=BROWSEC_CHROME_EXTENSION_ID,
+        help="Known Chrome Web Store Browsec ID, used only to explain ERR_BLOCKED_BY_CLIENT diagnostics",
     )
     parser.add_argument(
         "--vpn-countries",
@@ -259,6 +270,7 @@ def parse_args() -> Settings:
         headless=args.headless,
         enable_vpn=args.enable_vpn,
         vpn_extension_id=args.vpn_extension_id,
+        chrome_browsec_extension_id=args.chrome_browsec_extension_id,
         vpn_countries=vpn_countries,
         vpn_timeout=args.vpn_timeout,
         vpn_ip_check_url=args.vpn_ip_check_url,
@@ -309,24 +321,56 @@ def open_page(driver: WebDriver, url: str, timeout: int, page_name: str) -> None
     wait_for_page(driver, timeout, page_name)
 
 
-def open_browsec_popup(driver: WebDriver, extension_id: str, timeout: int) -> None:
+def is_edge_blocked_extension_page(body_text: str) -> bool:
+    blocked_markers = (
+        "err_blocked_by_client",
+        "blocked by client",
+        "blocked by microsoft edge",
+        "эта страница заблокирована microsoft edge",
+        "заблокирована",
+    )
+    return any(marker in body_text for marker in blocked_markers)
+
+
+def blocked_browsec_message(settings: Settings, popup_url: str) -> str:
+    message = (
+        f"Microsoft Edge blocked the Browsec extension page: {popup_url}. "
+        "Install Browsec from Microsoft Edge Add-ons and use its Edge extension ID, "
+        f"or pass it explicitly with --vpn-extension-id {BROWSEC_EDGE_EXTENSION_ID}."
+    )
+    if settings.vpn_extension_id == settings.chrome_browsec_extension_id:
+        message += (
+            f" The ID {settings.chrome_browsec_extension_id} is the Chrome Web Store ID and was "
+            "reported as blocked in Edge in this environment."
+        )
+    return message
+
+
+def open_browsec_popup(driver: WebDriver, settings: Settings) -> None:
     last_error: Exception | None = None
+    last_body_text = ""
     for path in BROWSEC_POPUP_PATHS:
-        popup_url = f"chrome-extension://{extension_id}/{path}"
+        popup_url = f"chrome-extension://{settings.vpn_extension_id}/{path}"
         try:
             logging.info("Opening Browsec popup page: %s", popup_url)
             driver.get(popup_url)
-            WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            WebDriverWait(driver, settings.vpn_timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
             body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+            last_body_text = body_text.replace("\n", " ")[:500]
+            if is_edge_blocked_extension_page(body_text):
+                raise AvitoCheckError(blocked_browsec_message(settings, popup_url))
             if "err_file_not_found" not in body_text and "this site can" not in body_text:
                 return
+        except AvitoCheckError:
+            raise
         except (TimeoutException, WebDriverException) as exc:
             last_error = exc
 
     raise AvitoCheckError(
         "Could not open the Browsec extension popup. Make sure Browsec is installed in the "
         "selected Edge profile and pass --edge-user-data-dir/--edge-profile-directory if needed. "
-        f"Last error: {last_error}"
+        f"Tried extension ID: {settings.vpn_extension_id}. "
+        f"Last page text: {last_body_text!r}. Last error: {last_error}"
     )
 
 
@@ -546,7 +590,7 @@ def enable_random_working_vpn(driver: WebDriver, settings: Settings) -> None:
 
     for country in countries:
         try:
-            open_browsec_popup(driver, settings.vpn_extension_id, settings.vpn_timeout)
+            open_browsec_popup(driver, settings)
             ensure_browsec_enabled(driver, settings.vpn_timeout)
             select_browsec_country(driver, country, settings.vpn_timeout)
             ensure_browsec_enabled(driver, settings.vpn_timeout)
@@ -561,7 +605,7 @@ def enable_random_working_vpn(driver: WebDriver, settings: Settings) -> None:
 
 def run_browsec_test(driver: WebDriver, settings: Settings) -> None:
     logging.info("Starting standalone Browsec test")
-    open_browsec_popup(driver, settings.vpn_extension_id, settings.vpn_timeout)
+    open_browsec_popup(driver, settings)
     ensure_browsec_enabled(driver, settings.vpn_timeout)
 
     if not verify_vpn_connection(driver, settings, "current Browsec location"):
