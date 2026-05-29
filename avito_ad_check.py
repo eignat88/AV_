@@ -34,6 +34,7 @@ DEFAULT_ITEM_URL = (
 BROWSEC_EDGE_EXTENSION_ID = "fjnehcbecaggobjholekjijaaekbnlgj"
 BROWSEC_CHROME_EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh"
 BROWSEC_EXTENSION_ID = BROWSEC_EDGE_EXTENSION_ID
+KNOWN_BROWSEC_EXTENSION_IDS = (BROWSEC_EDGE_EXTENSION_ID, BROWSEC_CHROME_EXTENSION_ID)
 DEFAULT_VPN_COUNTRIES = (
     "Австрия",
     "Бельгия",
@@ -140,6 +141,7 @@ class Settings:
     headless: bool
     enable_vpn: bool
     vpn_extension_id: str
+    vpn_extension_id_was_explicit: bool
     chrome_browsec_extension_id: str
     vpn_countries: tuple[str, ...]
     vpn_timeout: int
@@ -158,6 +160,11 @@ def configure_logging(log_file: str | None) -> None:
         format="%(asctime)s | %(levelname)s | %(message)s",
         handlers=handlers,
     )
+
+
+def was_arg_passed(option_name: str) -> bool:
+    """Return whether an option was provided on the command line."""
+    return any(arg == option_name or arg.startswith(f"{option_name}=") for arg in sys.argv[1:])
 
 
 def parse_args() -> Settings:
@@ -270,6 +277,7 @@ def parse_args() -> Settings:
         headless=args.headless,
         enable_vpn=args.enable_vpn,
         vpn_extension_id=args.vpn_extension_id,
+        vpn_extension_id_was_explicit=was_arg_passed("--vpn-extension-id"),
         chrome_browsec_extension_id=args.chrome_browsec_extension_id,
         vpn_countries=vpn_countries,
         vpn_timeout=args.vpn_timeout,
@@ -332,16 +340,37 @@ def is_edge_blocked_extension_page(body_text: str) -> bool:
     return any(marker in body_text for marker in blocked_markers)
 
 
-def blocked_browsec_message(settings: Settings, popup_url: str) -> str:
+def browsec_extension_ids_to_try(settings: Settings) -> tuple[str, ...]:
+    """Return Browsec IDs to probe, preserving user intent and stable order."""
+    if settings.vpn_extension_id_was_explicit:
+        return (settings.vpn_extension_id,)
+
+    ids: list[str] = []
+    for extension_id in (settings.vpn_extension_id, *KNOWN_BROWSEC_EXTENSION_IDS):
+        if extension_id and extension_id not in ids:
+            ids.append(extension_id)
+    return tuple(ids)
+
+
+def blocked_browsec_message(settings: Settings, popup_url: str, extension_id: str) -> str:
     message = (
-        f"Microsoft Edge blocked the Browsec extension page: {popup_url}. "
-        "Install Browsec from Microsoft Edge Add-ons and use its Edge extension ID, "
-        f"or pass it explicitly with --vpn-extension-id {BROWSEC_EDGE_EXTENSION_ID}."
+        f"Microsoft Edge blocked or could not load the Browsec extension page: {popup_url}. "
+        "This usually means the selected Selenium Edge profile does not have Browsec installed/enabled, "
+        "or Browsec is installed under a different extension ID. Selenium opens a clean temporary "
+        "profile unless you pass --edge-user-data-dir and --edge-profile-directory for the profile "
+        "where Browsec is installed."
     )
-    if settings.vpn_extension_id == settings.chrome_browsec_extension_id:
+    if extension_id == BROWSEC_EDGE_EXTENSION_ID:
         message += (
-            f" The ID {settings.chrome_browsec_extension_id} is the Chrome Web Store ID and was "
-            "reported as blocked in Edge in this environment."
+            f" The blocked ID ({extension_id}) is the Microsoft Edge Add-ons ID, so reinstalling "
+            "Browsec in the exact Edge profile used by this script is more likely to help than "
+            "passing the same ID again."
+        )
+    elif extension_id == settings.chrome_browsec_extension_id:
+        message += (
+            f" The blocked ID ({extension_id}) is the Chrome Web Store Browsec ID; if you installed "
+            "Browsec from Microsoft Edge Add-ons, use "
+            f"--vpn-extension-id {BROWSEC_EDGE_EXTENSION_ID} instead."
         )
     return message
 
@@ -349,28 +378,38 @@ def blocked_browsec_message(settings: Settings, popup_url: str) -> str:
 def open_browsec_popup(driver: WebDriver, settings: Settings) -> None:
     last_error: Exception | None = None
     last_body_text = ""
-    for path in BROWSEC_POPUP_PATHS:
-        popup_url = f"chrome-extension://{settings.vpn_extension_id}/{path}"
-        try:
-            logging.info("Opening Browsec popup page: %s", popup_url)
-            driver.get(popup_url)
-            WebDriverWait(driver, settings.vpn_timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
-            last_body_text = body_text.replace("\n", " ")[:500]
-            if is_edge_blocked_extension_page(body_text):
-                raise AvitoCheckError(blocked_browsec_message(settings, popup_url))
-            if "err_file_not_found" not in body_text and "this site can" not in body_text:
-                return
-        except AvitoCheckError:
-            raise
-        except (TimeoutException, WebDriverException) as exc:
-            last_error = exc
+    blocked_messages: list[str] = []
+    extension_ids = browsec_extension_ids_to_try(settings)
 
+    for extension_id in extension_ids:
+        for path in BROWSEC_POPUP_PATHS:
+            popup_url = f"chrome-extension://{extension_id}/{path}"
+            try:
+                logging.info("Opening Browsec popup page: %s", popup_url)
+                driver.get(popup_url)
+                WebDriverWait(driver, settings.vpn_timeout).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
+                body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+                last_body_text = body_text.replace("\n", " ")[:500]
+                if is_edge_blocked_extension_page(body_text):
+                    blocked_messages.append(blocked_browsec_message(settings, popup_url, extension_id))
+                    break
+                if "err_file_not_found" not in body_text and "this site can" not in body_text:
+                    if extension_id != settings.vpn_extension_id:
+                        logging.info("Using detected Browsec extension ID: %s", extension_id)
+                    return
+            except (TimeoutException, WebDriverException) as exc:
+                last_error = exc
+
+    details = " ".join(blocked_messages) if blocked_messages else ""
     raise AvitoCheckError(
-        "Could not open the Browsec extension popup. Make sure Browsec is installed in the "
-        "selected Edge profile and pass --edge-user-data-dir/--edge-profile-directory if needed. "
-        f"Tried extension ID: {settings.vpn_extension_id}. "
-        f"Last page text: {last_body_text!r}. Last error: {last_error}"
+        "Could not open the Browsec extension popup. Make sure Browsec is installed and enabled in the "
+        "selected Edge profile, then pass --edge-user-data-dir/--edge-profile-directory for that profile. "
+        "If Browsec was installed from a different store, pass the installed extension ID with "
+        "--vpn-extension-id. "
+        f"Tried extension IDs: {', '.join(extension_ids)}. "
+        f"Last page text: {last_body_text!r}. Last error: {last_error}. {details}"
     )
 
 
